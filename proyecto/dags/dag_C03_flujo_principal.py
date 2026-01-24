@@ -11,101 +11,83 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-# Config Docker + Spark (igual que en el ejemplo de fraud_pipeline)
-DOCKER_BIN = "docker"
-SPARK_CONTAINER_NAME = "spark-master"
-SPARK_SUBMIT_PATH = "/opt/spark/bin/spark-submit"
-SPARK_MASTER_URL = "spark://spark-master:7077"
-
-# Ruta dentro del contenedor spark-master
-# (mapeada desde shared_scripts_airflow:/opt/spark/app)
-PROJECT_NAME = "smart_inventory"
-BASE_APP_PATH = f"/opt/spark/app/{PROJECT_NAME}"
+# Configuración de Rutas en el Contenedor Spark
+# Nota: 'smart_inventory' viene de como lo copiamos en publish.sh
+BASE_APP_PATH = "/opt/spark/app/smart_inventory"
 
 with DAG(
     dag_id="dag_C03_inventario_inteligente_principal",
     default_args=default_args,
-    description="Pipeline E2E de inventario inteligente (Landing -> Bronze -> Silver -> Gold)",
+    description="Pipeline E2E Inventario (Spark 4.1.1 + Docker Bake-in)",
     schedule_interval=None,
     start_date=datetime(2025, 1, 1),
     catchup=False,
     tags=["inventario", "spark", "minio", "mariadb"],
 ) as dag:
 
-    # 1) Ingesta: Landing (shared_minio) -> Bronze (bucket MinIO via s3a)
+    # --- COMANDO BASE ---
+    # Usamos la configuración ganadora:
+    # 1. HOME=/tmp (para permisos)
+    # 2. ivy en /tmp (para cache)
+    # 3. SIN --packages (usamos las libs quemadas en la imagen Docker)
+    SPARK_SUBMIT_CMD = f"""
+        docker exec -e HOME=/tmp spark-master /opt/spark/bin/spark-submit \\
+          --master spark://spark-master:7077 \\
+          --conf spark.eventLog.enabled=true \\
+          --conf spark.eventLog.dir=file:///tmp/spark-events \\
+          --conf spark.jars.ivy=/tmp/.ivy2 \\
+          --conf spark.sql.parquet.enableVectorizedReader=false \\
+    """
+
+    # 1) Ingesta: Landing (CSV) -> Bronze (Parquet)
     ingesta_bronce = BashOperator(
         task_id="spark_ingesta_bronce",
         bash_command=f"""
             set -e
-            echo "🚀 Ejecutando ingesta Landing -> Bronze dentro de {SPARK_CONTAINER_NAME}..."
-
-            {DOCKER_BIN} exec {SPARK_CONTAINER_NAME} {SPARK_SUBMIT_PATH} \
-              --master {SPARK_MASTER_URL} \
-              --conf spark.jars.ivy=/tmp/.ivy2 \
-              --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
-              {BASE_APP_PATH}/bronce/spark_ingreso_datos_crudos.py
+            echo "🚀 [1/5] Ingesta Landing -> Bronce..."
+            {SPARK_SUBMIT_CMD} {BASE_APP_PATH}/bronce/spark_ingreso_datos_crudos.py
         """,
     )
 
-    # 2) Limpieza (Bronze -> Silver)  [placeholder, cuando tengas la lógica]
+    # 2) Limpieza: Bronze -> Silver
     limpieza_plata = BashOperator(
         task_id="spark_limpieza_plata",
         bash_command=f"""
             set -e
-            echo "🚀 Ejecutando limpieza Bronze -> Silver dentro de {SPARK_CONTAINER_NAME}..."
-
-            {DOCKER_BIN} exec {SPARK_CONTAINER_NAME} {SPARK_SUBMIT_PATH} \
-              --master {SPARK_MASTER_URL} \
-              --conf spark.jars.ivy=/tmp/.ivy2 \
-              --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
-              {BASE_APP_PATH}/plata/spark_limpieza_datos_ventas.py
+            echo "🚀 [2/5] Limpieza Bronce -> Plata..."
+            {SPARK_SUBMIT_CMD} {BASE_APP_PATH}/plata/spark_limpieza_datos_ventas.py
         """,
     )
 
-    # 3) Features (Silver -> Oro) [placeholder]
+    # 3) Feature Engineering: Silver -> Gold (Features)
     features_oro = BashOperator(
         task_id="spark_features_oro",
         bash_command=f"""
             set -e
-            echo "🚀 Ejecutando ingeniería de características Silver -> Oro dentro de {SPARK_CONTAINER_NAME}..."
-
-            {DOCKER_BIN} exec {SPARK_CONTAINER_NAME} {SPARK_SUBMIT_PATH} \
-              --master {SPARK_MASTER_URL} \
-              --conf spark.jars.ivy=/tmp/.ivy2 \
-              --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
-              {BASE_APP_PATH}/oro/spark_ingenieria_caracteristicas.py
+            echo "🚀 [3/5] Ingeniería de Características Plata -> Oro..."
+            {SPARK_SUBMIT_CMD} {BASE_APP_PATH}/oro/spark_ingenieria_caracteristicas.py
         """,
     )
 
-    # 4) Entrenamiento modelo demanda [placeholder]
+    # 4) Entrenamiento: Gold -> Modelo
     entrenamiento_oro = BashOperator(
         task_id="spark_entrenamiento_oro",
         bash_command=f"""
             set -e
-            echo "🚀 Ejecutando entrenamiento del modelo de demanda dentro de {SPARK_CONTAINER_NAME}..."
-
-            {DOCKER_BIN} exec {SPARK_CONTAINER_NAME} {SPARK_SUBMIT_PATH} \
-              --master {SPARK_MASTER_URL} \
-              --conf spark.jars.ivy=/tmp/.ivy2 \
-              --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
-              {BASE_APP_PATH}/oro/spark_entrenamiento_modelo_de_demanda.py
+            echo "🚀 [4/5] Entrenamiento Modelo de Demanda..."
+            {SPARK_SUBMIT_CMD} {BASE_APP_PATH}/oro/spark_entrenamiento_modelo_de_demanda.py
         """,
     )
 
-    # 5) Simulación Monte Carlo [placeholder]
+    # 5) Simulación Monte Carlo y Guardado DB
     simulacion_montecarlo = BashOperator(
         task_id="spark_simulacion_montecarlo",
         bash_command=f"""
             set -e
-            echo "🚀 Ejecutando simulación de Monte Carlo dentro de {SPARK_CONTAINER_NAME}..."
-
-            {DOCKER_BIN} exec {SPARK_CONTAINER_NAME} {SPARK_SUBMIT_PATH} \
-              --master {SPARK_MASTER_URL} \
-              --conf spark.jars.ivy=/tmp/.ivy2 \
-              --packages org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262 \
-              {BASE_APP_PATH}/oro/spark_simulacion_montecarlo.py
+            echo "🚀 [5/5] Simulación Monte Carlo y Exportación..."
+            {SPARK_SUBMIT_CMD} {BASE_APP_PATH}/oro/spark_simulacion_montecarlo.py
         """,
     )
 
-    # Flujo lineal
+    # Definición de dependencias
     ingesta_bronce >> limpieza_plata >> features_oro >> entrenamiento_oro >> simulacion_montecarlo
