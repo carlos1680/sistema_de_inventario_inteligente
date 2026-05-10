@@ -1,45 +1,10 @@
 import sys
 import os
-import boto3
-from botocore.exceptions import ClientError
-
-# Configuración de paths para importar 'comun'
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from comun.sesion_spark import obtener_sesion_spark
+from comun.minio_utils import garantizar_bucket
 from pyspark.sql.functions import current_timestamp, lit
-
-def garantizar_bucket(bucket_name):
-    """
-    Verifica si el bucket existe en MinIO y si no, lo crea.
-    Usa las mismas credenciales del entorno.
-    """
-    print(f"🔍 Verificando existencia del bucket: '{bucket_name}'...")
-    
-    # Credenciales desde variables de entorno (las mismas que usa Spark)
-    endpoint = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-    access_key = os.getenv("MINIO_ACCESS_KEY", "admin")
-    secret_key = os.getenv("MINIO_SECRET_KEY", "admin123")
-
-    s3_client = boto3.client(
-        's3',
-        endpoint_url=endpoint,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key
-    )
-
-    try:
-        s3_client.head_bucket(Bucket=bucket_name)
-        print(f"✅ El bucket '{bucket_name}' ya existe.")
-    except ClientError:
-        # Si falla el head_bucket, asumimos que no existe y lo creamos
-        print(f"⚠️ El bucket '{bucket_name}' no existe. Creándolo...")
-        try:
-            s3_client.create_bucket(Bucket=bucket_name)
-            print(f"🎉 Bucket '{bucket_name}' creado exitosamente.")
-        except Exception as e:
-            print(f"❌ Error fatal creando el bucket: {e}")
-            raise e
 
 def ingesta_landing_a_bronce():
     # 0. Paso Previo: Garantizar que el bucket 'bronze' exista

@@ -1,102 +1,127 @@
 import sys
 import os
-import boto3
-from botocore.exceptions import ClientError
-
-# Configuración de paths para importar 'comun'
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from comun.sesion_spark import obtener_sesion_spark
+from comun.minio_utils import garantizar_bucket
+from comun.mlflow_client import get_or_create_experiment, start_run, log_params, log_metrics, end_run
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml import Pipeline
 from pyspark.ml.evaluation import RegressionEvaluator
-from pyspark.sql.functions import col, lead
+from pyspark.sql.functions import col, lead, percentile_approx
 from pyspark.sql.window import Window
 
-def garantizar_bucket(bucket_name):
-    """Verifica si el bucket existe en MinIO y si no, lo crea."""
-    print(f"🔍 Verificando existencia del bucket: '{bucket_name}'...")
-    
-    endpoint = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-    access_key = os.getenv("MINIO_ACCESS_KEY", "admin")
-    secret_key = os.getenv("MINIO_SECRET_KEY", "admin123")
 
-    s3_client = boto3.client('s3', endpoint_url=endpoint, aws_access_key_id=access_key, aws_secret_access_key=secret_key)
-
-    try:
-        s3_client.head_bucket(Bucket=bucket_name)
-        print(f"✅ El bucket '{bucket_name}' ya existe.")
-    except ClientError:
-        print(f"⚠️ El bucket '{bucket_name}' no existe. Creándolo...")
-        try:
-            s3_client.create_bucket(Bucket=bucket_name)
-            print(f"🎉 Bucket '{bucket_name}' creado exitosamente.")
-        except Exception as e:
-            print(f"❌ Error fatal creando el bucket: {e}")
-            raise e
 
 def entrenar_modelo_demanda():
-    # 0. Garantizar bucket para modelos
     garantizar_bucket("models")
 
     spark = obtener_sesion_spark("Entrenamiento_Modelo_Demanda")
-    
-    path_gold_features = "s3a://gold/smart_inventory/dataset_features"
-    path_model_output = "s3a://models/smart_inventory/rf_demanda_v1"
 
-    print(f">>> Leyendo dataset de features: {path_gold_features}")
-    df = spark.read.parquet(path_gold_features)
+    path_features    = "s3a://gold/smart_inventory/dataset_features"
+    path_model       = "s3a://models/smart_inventory/rf_demanda_v1"
 
-    # 1. CREAR EL TARGET (Corrección del error)
-    # Queremos predecir la venta del día siguiente.
-    # Usamos 'lead' para traer el valor de mañana a la fila de hoy.
-    print(">>> Creando columna target (Ventas Próximo Día)...")
+    print(f">>> Leyendo features: {path_features}")
+    df = spark.read.parquet(path_features)
+
+    # ── Target: ventas del día siguiente ──────────────────────────────────────
     w = Window.partitionBy("tienda_id", "producto_id").orderBy("fecha")
-    
-    df_con_target = df.withColumn("target_ventas_proximo_dia", lead("cantidad_vendida", 1).over(w)) \
-                      .na.drop() # Eliminamos la última fila de cada serie (no tiene target)
+    df_ml = (
+        df.withColumn("target", lead("cantidad_vendida", 1).over(w))
+          .na.drop()
+          .withColumn("target", col("target").cast("double"))
+    )
 
-    # Convertir a double para ML
-    df_ml = df_con_target.withColumn("target_ventas_proximo_dia", col("target_ventas_proximo_dia").cast("double"))
+    # ── Split temporal (evita data leakage en series de tiempo) ───────────────
+    # Usamos el percentil 80 de fechas como corte, no un random split.
+    cutoff = df_ml.select(percentile_approx("fecha", 0.8)).first()[0]
+    train  = df_ml.filter(col("fecha") <= cutoff)
+    test   = df_ml.filter(col("fecha") >  cutoff)
 
-    # 2. Definir Features para el modelo
-    # Usamos las que creamos en el paso anterior + algunas originales utiles
+    n_train = train.count()
+    n_test  = test.count()
+    print(f">>> Split temporal — corte: {cutoff} | Train: {n_train} | Test: {n_test}")
+
+    # ── Features ──────────────────────────────────────────────────────────────
     feature_cols = [
-        "precio_unitario", 
-        "en_promocion", 
-        "ventas_lag_1", 
-        "ventas_lag_7", 
+        "precio_unitario",
+        "en_promocion",
+        "ventas_lag_1",
+        "ventas_lag_7",
         "promedio_movil_7",
         "dia_semana",
-        "mes"
+        "mes",
     ]
-    
+
+    NUM_TREES  = 20
+    MAX_DEPTH  = 5
+    SEED       = 42
+
     assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
-    
-    # 3. Split Train/Test
-    # Lo ideal es split temporal, pero para este ejemplo simple usamos random
-    train_data, test_data = df_ml.randomSplit([0.8, 0.2], seed=42)
-    
-    print(f">>> Registros Train: {train_data.count()} | Test: {test_data.count()}")
-
-    # 4. Entrenar Random Forest
-    rf = RandomForestRegressor(featuresCol="features", labelCol="target_ventas_proximo_dia", numTrees=20)
-    
+    rf        = RandomForestRegressor(
+        featuresCol="features",
+        labelCol="target",
+        numTrees=NUM_TREES,
+        maxDepth=MAX_DEPTH,
+        seed=SEED,
+    )
     pipeline = Pipeline(stages=[assembler, rf])
-    
-    print(">>> Entrenando modelo...")
-    model = pipeline.fit(train_data)
 
-    # 5. Evaluar
-    predictions = model.transform(test_data)
-    evaluator = RegressionEvaluator(labelCol="target_ventas_proximo_dia", predictionCol="prediction", metricName="rmse")
-    rmse = evaluator.evaluate(predictions)
-    print(f"✅ Modelo Entrenado. RMSE en Test: {rmse}")
+    # ── MLflow tracking ───────────────────────────────────────────────────────
+    experiment_id = get_or_create_experiment("smart_inventory_demand_forecast")
+    run_id        = start_run(experiment_id, "rf_demanda_v1")
+    print(f">>> MLflow run iniciado: {run_id}")
 
-    # 6. Guardar Modelo
-    print(f">>> Guardando modelo en: {path_model_output}")
-    model.write().overwrite().save(path_model_output)
+    try:
+        log_params(run_id, {
+            "model":          "RandomForestRegressor",
+            "num_trees":      NUM_TREES,
+            "max_depth":      MAX_DEPTH,
+            "seed":           SEED,
+            "split_type":     "temporal_p80",
+            "cutoff_date":    str(cutoff),
+            "n_train":        n_train,
+            "n_test":         n_test,
+            "features":       ",".join(feature_cols),
+        })
+
+        print(">>> Entrenando modelo...")
+        model = pipeline.fit(train)
+
+        # ── Métricas ──────────────────────────────────────────────────────────
+        preds = model.transform(test)
+
+        def evaluar(metrica):
+            return RegressionEvaluator(
+                labelCol="target", predictionCol="prediction", metricName=metrica
+            ).evaluate(preds)
+
+        rmse = evaluar("rmse")
+        mae  = evaluar("mae")
+        r2   = evaluar("r2")
+
+        print(f"✅ RMSE: {rmse:.4f} | MAE: {mae:.4f} | R²: {r2:.4f}")
+
+        # ── Feature importance ────────────────────────────────────────────────
+        rf_model       = model.stages[-1]
+        importances    = rf_model.featureImportances.toArray()
+        fi_metrics     = {f"fi_{feat}": float(imp) for feat, imp in zip(feature_cols, importances)}
+
+        log_metrics(run_id, {"rmse": rmse, "mae": mae, "r2": r2, **fi_metrics})
+
+        # ── Guardar modelo ────────────────────────────────────────────────────
+        print(f">>> Guardando modelo en: {path_model}")
+        model.write().overwrite().save(path_model)
+
+        log_params(run_id, {"artifact_path": path_model})
+        end_run(run_id, status="FINISHED")
+        print(f"✅ MLflow run cerrado: {run_id}")
+
+    except Exception as e:
+        end_run(run_id, status="FAILED")
+        raise e
+
 
 if __name__ == "__main__":
     entrenar_modelo_demanda()

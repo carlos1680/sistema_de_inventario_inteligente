@@ -4,8 +4,8 @@ set -e
 # ============================================================================
 # CONFIGURACIÓN (Ajustada a la nueva Infra)
 # ============================================================================
-# Ruta base donde tienes el repo 'docker-compose-contenedores'
-BIGDATA_BASE="$HOME/Documentos/docker-compose-contenedores/bigdata/volumenes"
+# Ruta base del repo bigdata_stack_platform
+BIGDATA_BASE="$HOME/Documentos/repositoriosGithub/personal/bigdata_stack_platform/volumenes"
 BIGDATA_SHARED="$BIGDATA_BASE/shared"
 
 # Colores

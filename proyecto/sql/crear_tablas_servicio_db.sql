@@ -1,22 +1,24 @@
-CREATE DATABASE IF NOT EXISTS inventario_db;
-USE inventario_db;
+USE bigdata_db;
 
--- Tabla para el forecast de demanda
+-- Resultados del modelo de forecast de demanda
 CREATE TABLE IF NOT EXISTS reporte_forecast (
-    fecha DATE,
-    producto_id VARCHAR(50),
-    tienda_id VARCHAR(50),
-    demanda_predicha FLOAT,
-    error_estimado FLOAT,
-    fecha_proceso TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    fecha            DATE,
+    producto_id      VARCHAR(50),
+    tienda_id        VARCHAR(50),
+    demanda_predicha DECIMAL(10,4),
+    fecha_proceso    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_producto_fecha (producto_id, fecha)
 );
 
--- Tabla para los resultados de Monte Carlo
+-- Resultados de la simulación Monte Carlo de stock
 CREATE TABLE IF NOT EXISTS reporte_simulacion_stock (
-    producto_id VARCHAR(50),
-    tienda_id VARCHAR(50),
-    probabilidad_quiebre FLOAT,
-    stock_sugerido INT,
-    nivel_servicio_objetivo FLOAT,
-    fecha_proceso TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    fecha                   DATE,
+    producto_id             VARCHAR(50),
+    tienda_id               VARCHAR(50),
+    probabilidad_quiebre    DECIMAL(5,4),
+    demanda_p50             DECIMAL(10,4),
+    demanda_p95_critica     DECIMAL(10,4),
+    stock_promedio_esperado DECIMAL(10,4),
+    fecha_proceso           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_producto_fecha (producto_id, fecha)
 );
